@@ -19,21 +19,26 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 使用Chocolatey安装完整WDK环境
-    - name: Install WDK via Chocolatey
+    # 使用官方推荐的WDK安装方式
+    - name: Install WDK
       run: |
-        choco install -y windows-driver-kit --version=10.0.22621.0
-        refreshenv
+        curl.exe -L -o wdksetup.exe https://go.microsoft.com/fwlink/?linkid=2166289
+        start /wait wdksetup.exe /quiet /norestart /installpath "C:\Program Files (x86)\Windows Kits\10"
+        
+        # 设置环境变量
+        echo "WINDOWSSDKDIR=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
+        echo "WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
+        echo "WindowsSDKVersion=${{ env.WDK_VERSION }}" >> $env:GITHUB_ENV
       shell: powershell
 
-    # 设置完整的构建环境
+    # 设置构建环境
     - name: Setup Build Environment
       uses: microsoft/setup-msbuild@v1
       with:
         vs-version: 17.0
         windows-sdk-version: ${{ env.WDK_VERSION }}
 
-    # 编译驱动项目 - 终极修复方案
+    # 编译驱动项目 - 终极修复
     - name: Build SGuardLimit_VMIO Driver
       run: |
         cd SGuardLimit_VMIO
@@ -57,7 +62,7 @@ jobs:
         
         if not exist "x64\Release\Hutao.sys" (
           echo ##[error] Hutao.sys not found!
-          echo ##[error] INCLUDE=%INCLUDE%
+          echo ##[error] Checking WDK installation...
           dir "%WDK_DIR%\Include\%WDK_VER%\km"
           exit 1
         )
