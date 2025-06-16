@@ -10,66 +10,73 @@ env:
 
 jobs:
   build:
-    runs-on: windows-latest  # GitHub 托管的 Windows 运行器（已预装 VS 2022）
+    runs-on: windows-latest
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 步骤1：安装 WDK（静默模式）
+    # 步骤1：安装WDK（修复字符串引号问题）
     - name: Install WDK
+      shell: powershell
       run: |
+        # 下载WDK安装程序
         $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2166289"
         $installerPath = "$env:RUNNER_TEMP\wdksetup.exe"
-        
-        # 下载 WDK 安装程序
         Write-Host "Downloading WDK from $wdkUrl..."
         Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath
 
-        # 静默安装到默认路径
-        Start-Process -Wait -FilePath $installerPath -ArgumentList @(
+        # 安装WDK（使用单引号定义路径）
+        $installArgs = @(
           "/quiet",
           "/norestart",
-          "/installpath `C:\Program Files (x86)\Windows Kits\10`"
+          "/installpath `"C:\Program Files (x86)\Windows Kits\10`""
         )
+        Start-Process -Wait -FilePath $installerPath -ArgumentList $installArgs
 
-        # 验证安装
-        $ntifsPath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h"
+        # 验证安装（修复路径字符串）
+        $ntifsPath = Join-Path "C:\Program Files (x86)\Windows Kits\10" "Include\$env:WDK_VERSION\km\ntifs.h"
         if (-not (Test-Path $ntifsPath)) {
-          Write-Error "WDK installation failed - ntifs.h not found!"
-          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Recurse | Where-Object { $_.Name -eq "ntifs.h" }
+          Write-Error "WDK installation failed - ntifs.h not found at $ntifsPath"
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10" -Recurse -Filter "ntifs.h" | Select-Object FullName
           exit 1
         }
 
     # 步骤2：配置环境变量
     - name: Setup Environment
+      shell: powershell
       run: |
-        # 设置 MSBuild 和 WDK 路径
-        $env:WindowsSdkDir = "C:\Program Files (x86)\Windows Kits\10"
-        $env:WindowsSDKVersion = "$env:WDK_VERSION"
-        $env:INCLUDE = "$env:WindowsSdkDir\Include\$env:WDK_VERSION\km;$env:WindowsSdkDir\Include\$env:WDK_VERSION\shared;$env:INCLUDE"
-        $env:LIB = "$env:WindowsSdkDir\Lib\$env:WDK_VERSION\km\x64;$env:LIB"
+        # 使用Join-Path安全拼接路径
+        $sdkDir = "C:\Program Files (x86)\Windows Kits\10"
+        $env:WindowsSdkDir = $sdkDir
+        $env:WindowsSDKVersion = $env:WDK_VERSION
+        $env:INCLUDE = "$(Join-Path $sdkDir "Include\$env:WDK_VERSION\km");$(Join-Path $sdkDir "Include\$env:WDK_VERSION\shared");$env:INCLUDE"
+        $env:LIB = "$(Join-Path $sdkDir "Lib\$env:WDK_VERSION\km\x64");$env:LIB"
 
-        # 打印关键路径验证
-        Write-Host "WDK Include Path: $env:WindowsSdkDir\Include\$env:WDK_VERSION\km"
-        Write-Host "MSBuild Path: $(where.exe msbuild)"
+        # 打印验证信息
+        Write-Host "WDK paths configured:"
+        Write-Host "INCLUDE = $env:INCLUDE"
+        Write-Host "LIB = $env:LIB"
 
     # 步骤3：编译驱动项目
     - name: Build Driver
+      shell: powershell
       run: |
         cd SGuardLimit_VMIO
         
-        # 使用完整路径调用 MSBuild
-        & "$(where.exe msbuild)" SGuardLimit_VMIO.vcxproj `
+        # 使用Join-Path处理路径
+        $msbuildPath = (Get-Command msbuild).Source
+        $includePath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km"
+        
+        & $msbuildPath SGuardLimit_VMIO.vcxproj `
           /p:Configuration=Release `
           /p:Platform=x64 `
           /p:WindowsTargetPlatformVersion=$env:WDK_VERSION `
           /p:PlatformToolset=WindowsKernelModeDriver10.0 `
-          /p:AdditionalIncludeDirectories="C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km" `
+          /p:AdditionalIncludeDirectories="$includePath" `
           /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006" `
           /flp:"LogFile=build.log;Verbosity=diagnostic"
 
-        # 验证输出
         if (-not (Test-Path "x64\Release\Hutao.sys")) {
           Write-Error "Driver compilation failed!"
           Get-Content "build.log" -Tail 50 | Write-Host
@@ -78,9 +85,10 @@ jobs:
 
     # 步骤4：编译用户层程序
     - name: Build User Application
+      shell: powershell
       run: |
         cd sguard_limit
-        & "$(where.exe msbuild)" sguard_limit.sln `
+        & (Get-Command msbuild).Source sguard_limit.sln `
           /p:Configuration=Release `
           /p:Platform=x64
 
