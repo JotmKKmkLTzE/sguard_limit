@@ -24,6 +24,8 @@ jobs:
       run: |
         curl.exe -L -o wdksetup.exe https://go.microsoft.com/fwlink/?linkid=2166289
         start /wait wdksetup.exe /quiet /install
+        setx WINDOWSSDKDIR "C:\Program Files (x86)\Windows Kits\10" /M
+        setx WINDOWSSDKVERSION "%WDK_VERSION%" /M
 
     # 配置 MSBuild 环境
     - name: Set up MSBuild
