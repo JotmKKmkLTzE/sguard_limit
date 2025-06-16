@@ -19,34 +19,47 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 步骤1：安装Visual Studio Build Tools
+    # 步骤1：安装VS Build Tools（官方方式）
     - name: Install VS Build Tools
       run: |
-        choco install -y visualstudio2022-buildtools --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-        refreshenv
-
-    # 步骤2：分步安装WDK组件
-    - name: Install WDK Components
-      run: |
-        # 下载WDK安装程序
-        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile wdksetup.exe
+        # 下载VS Build Tools安装程序
+        Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile vs_buildtools.exe
         
-        # 分步安装必要组件
-        Start-Process -Wait -FilePath .\wdksetup.exe -ArgumentList @(
-          "/quiet",
-          "/norestart",
-          "/installpath `"C:\WDK`"",
-          "features +",
-          "OptionId.WindowsDriverKitComplete",
-          "OptionId.WindowsDriverKitVSIntegration"
+        # 安装必要组件
+        Start-Process -Wait -FilePath .\vs_buildtools.exe -ArgumentList @(
+          "--quiet",
+          "--norestart",
+          "--wait",
+          "--add Microsoft.VisualStudio.Workload.VCTools",
+          "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+          "--add Microsoft.VisualStudio.Component.Windows10SDK.$env:WDK_VERSION"
         )
         
         # 验证安装
+        if (-not (Test-Path "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC")) {
+          Write-Error "VS Build Tools installation failed!"
+          exit 1
+        }
+
+    # 步骤2：安装WDK（独立安装）
+    - name: Install WDK Standalone
+      run: |
+        # 下载WDK
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile wdksetup.exe
+        
+        # 静默安装到自定义目录
+        Start-Process -Wait -FilePath .\wdksetup.exe -ArgumentList @(
+          "/quiet",
+          "/norestart",
+          "/installpath `"C:\WDK`""
+        )
+        
+        # 验证WDK安装
         $ntifsPath = "C:\WDK\Include\$env:WDK_VERSION\km\ntifs.h"
         if (-not (Test-Path $ntifsPath)) {
-          Write-Error "Critical WDK files missing!"
-          Write-Host "Searching for ntifs.h in system..."
-          Get-ChildItem "C:\" -Recurse -Filter "ntifs.h" -ErrorAction SilentlyContinue | Select-Object FullName
+          Write-Error "WDK installation failed - ntifs.h not found!"
+          Write-Host "Available WDK versions:"
+          Get-ChildItem "C:\WDK\Include" | Select-Object Name
           exit 1
         }
         
@@ -55,27 +68,23 @@ jobs:
         echo "WindowsSdkDir=C:\WDK" >> $env:GITHUB_ENV
         echo "WindowsSDKVersion=$env:WDK_VERSION" >> $env:GITHUB_ENV
 
-    # 步骤3：设置完整构建环境
+    # 步骤3：配置编译环境
     - name: Setup Build Environment
       run: |
-        # 设置完整的包含路径
+        # 设置完整的环境变量
         $env:INCLUDE = "C:\WDK\Include\$env:WDK_VERSION\km;C:\WDK\Include\$env:WDK_VERSION\shared;$env:INCLUDE"
         $env:LIB = "C:\WDK\Lib\$env:WDK_VERSION\km\x64;$env:LIB"
         
-        # 验证环境
-        Write-Host "INCLUDE paths: $env:INCLUDE"
-        Write-Host "LIB paths: $env:LIB"
-        dir "C:\WDK\Include\$env:WDK_VERSION\km\nt*" | Select-Object Name
+        # 打印关键路径验证
+        Write-Host "WDK include paths:"
+        dir "C:\WDK\Include\$env:WDK_VERSION\km\n*" | Select-Object Name
 
     # 步骤4：编译驱动项目
     - name: Build SGuardLimit_VMIO Driver
       run: |
         cd SGuardLimit_VMIO
         
-        # 强制清理
-        if (Test-Path "x64") { Remove-Item -Recurse -Force "x64" }
-        
-        # 使用完整路径调用msbuild
+        # 使用完整路径调用MSBuild
         & "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\msbuild.exe" SGuardLimit_VMIO.vcxproj `
           /p:Configuration=Release `
           /p:Platform=x64 `
@@ -86,7 +95,7 @@ jobs:
         
         if (-not (Test-Path "x64\Release\Hutao.sys")) {
           Write-Error "Driver compilation failed!"
-          Get-ChildItem -Recurse "x64\Release"
+          Get-Content "x64\Release\*.log" -ErrorAction SilentlyContinue
           exit 1
         }
 
