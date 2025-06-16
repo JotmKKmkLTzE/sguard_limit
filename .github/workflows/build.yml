@@ -30,7 +30,7 @@ jobs:
         Start-Process -Wait -FilePath $installerPath -ArgumentList @(
           "/quiet",
           "/norestart",
-          "/installpath `"C:\Program Files (x86)\Windows Kits\10`"
+          "/installpath `C:\Program Files (x86)\Windows Kits\10`"
         )
 
         # 验证安装
