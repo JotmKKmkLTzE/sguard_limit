@@ -2,47 +2,73 @@ name: Build SGuardLimit Project
 
 on: [push, workflow_dispatch]
 
+env:
+  WDK_VERSION: "10.0.22621.0"
+  SDK_VERSION: "10.0.22621.0"
+
 jobs:
-  build: 
-    runs-on: windows-latest 
+  build:
+    runs-on: windows-latest
 
-    steps: 
-    - name: Checkout code 
-      uses: actions/checkout@v2 
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-    - name: Setup NuGet 
-      uses: NuGet/setup-nuget@v1 
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v1
 
     - name: Set up MSBuild
       uses: microsoft/setup-msbuild@v1
 
-    # 步骤5：编译驱动项目
+    # 步骤1：安装Windows SDK和WDK
+    - name: Install Windows SDK and WDK
+      shell: powershell
+      run: |
+        # 安装Windows SDK
+        $sdkUrl = "https://go.microsoft.com/fwlink/?prd=11966&pver=1.0&plcid=0x409&clcid=0x409&ar=WindowsSDK&sar=SdkFeatures&o1=$env:SDK_VERSION"
+        Invoke-WebRequest -Uri $sdkUrl -OutFile "$env:RUNNER_TEMP\winsdksetup.exe"
+        Start-Process -Wait -FilePath "$env:RUNNER_TEMP\winsdksetup.exe" -ArgumentList "/quiet /norestart"
+
+        # 安装WDK
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile "$env:RUNNER_TEMP\wdksetup.exe"
+        Start-Process -Wait -FilePath "$env:RUNNER_TEMP\wdksetup.exe" -ArgumentList "/quiet /norestart"
+
+        # 验证安装
+        if (-not (Test-Path "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h")) {
+          throw "WDK installation verification failed!"
+        }
+
+    # 步骤2：编译驱动项目（关键修正）
     - name: Build Driver
       shell: powershell
       run: |
         cd SGuardLimit_VMIO
         
-        # 使用完整路径调用MSBuild
-        & msbuild /t:build SGuardLimit_VMIO.vcxproj `
+        # 使用正确的预处理器定义语法
+        & msbuild SGuardLimit_VMIO.vcxproj `
           /p:Configuration=Release `
           /p:Platform=x64 `
           /p:WindowsTargetPlatformVersion=$env:SDK_VERSION `
           /p:PlatformToolset=WindowsKernelModeDriver10.0 `
           /p:AdditionalIncludeDirectories="C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km" `
-          /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006"
+          /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006" `
+          /flp:"LogFile=driver_build.log;Verbosity=diagnostic"
         
         if (-not (Test-Path "x64\Release\Hutao.sys")) {
-          throw "Driver compilation failed!"
+          Write-Host "##[error] Driver compilation failed!"
+          Get-Content "driver_build.log" -Tail 100 | Write-Host
+          exit 1
         }
 
-    # 步骤6：编译用户层程序
+    # 步骤3：编译用户层程序
     - name: Build User Application
       shell: powershell
       run: |
         cd sguard_limit
-        & msbuild.exe /t:build sguard_limit.sln `
+        & msbuild sguard_limit.sln `
           /p:Configuration=Release `
-          /p:Platform=x64
+          /p:Platform=x64 `
+          /flp:"LogFile=user_build.log;Verbosity=diagnostic"
 
     # 上传产物
     - name: Upload Artifacts
