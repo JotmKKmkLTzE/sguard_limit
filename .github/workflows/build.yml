@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  WDK_VERSION: "10.0.22621.0"     # 根据项目需求调整
+  WDK_VERSION: "10.0.22621.0"
   PLATFORM_TOOLSET: "WindowsKernelModeDriver10.0"
 
 jobs:
@@ -20,17 +20,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 安装 WDK（Windows Driver Kit）
+    # 安装 WDK（修正后的 PowerShell 方式）
     - name: Install WDK
       run: |
-        curl -LO https://go.microsoft.com/fwlink/?linkid=2166289
-        start /wait wdksetup.exe /quiet /install
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile "wdksetup.exe"
+        Start-Process -Wait -FilePath "wdksetup.exe" -ArgumentList "/quiet /install"
       shell: powershell
 
     - name: Set up MSBuild
       uses: microsoft/setup-msbuild@v1
 
-    # 编译驱动项目（生成 Hutao.sys）
+    # 编译驱动（生成 Hutao.sys）
     - name: Build SGuardLimit_VMIO Driver
       run: |
         cd SGuardLimit_VMIO
@@ -39,22 +39,20 @@ jobs:
           /p:Platform=x64 ^
           /p:WindowsTargetPlatformVersion=%WDK_VERSION% ^
           /p:PlatformToolset=%PLATFORM_TOOLSET%
-
-        # 验证输出文件
         if not exist "x64\Release\Hutao.sys" (
-          echo ##[error] Hutao.sys not found in x64\Release!
+          echo ##[error] Hutao.sys not found!
           dir x64\Release
           exit 1
         )
 
-    # 编译用户层解决方案
+    # 编译用户层
     - name: Build sguard_limit Solution
       run: |
         msbuild sguard_limit.sln ^
           /p:Configuration=Release ^
           /p:Platform=x64
 
-    # 使用 v4 上传产物（兼容最新版）
+    # 上传产物（v4）
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -62,4 +60,3 @@ jobs:
         path: |
           SGuardLimit_VMIO/x64/Release/Hutao.sys
           x64/Release/*.exe
-          x64/Release/*.dll
