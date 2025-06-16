@@ -4,7 +4,7 @@ on: [push, workflow_dispatch]
 
 env:
   WDK_VERSION: "10.0.22621.0"
-  SDK_VERSION: "10.0.22621.0"
+  SDK_VERSION: "22621"  # 必须与 setup-windows10-sdk-action 的 5 位版本号一致
 
 jobs:
   build:
@@ -14,162 +14,50 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Setup NuGet
-      uses: NuGet/setup-nuget@v1
+    # 步骤1：安装 Windows 10 SDK
+    - name: Setup Windows 10 SDK
+      uses: GuillaumeFalourd/setup-windows10-sdk-action@v2
+      with:
+        sdk-version: ${{ env.SDK_VERSION }}  # 22621 对应 Windows 11 SDK (10.0.22621.0)
 
-    - name: Set up MSBuild
-      uses: microsoft/setup-msbuild@v1
-
-    # 步骤1：可靠安装Windows SDK（兼容旧版PS）
-    - name: Install Windows SDK
-      shell: powershell
-      run: |
-        $sdkUrl = "https://go.microsoft.com/fwlink/?prd=11966&pver=1.0&plcid=0x409&clcid=0x409&ar=WindowsSDK&sar=SdkFeatures&o1=$env:SDK_VERSION"
-        $installerPath = "$env:RUNNER_TEMP\winsdksetup.exe"
-        $retryCount = 0
-        $maxRetries = 3
-        $success = $false
-
-        function Download-File {
-          param($url, $path)
-          $attempt = 0
-          while ($attempt -lt 3) {
-            try {
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              $webClient = New-Object System.Net.WebClient
-              $webClient.DownloadFile($url, $path)
-              return $true
-            }
-            catch {
-              $attempt++
-              if ($attempt -ge 3) { return $false }
-              Start-Sleep -Seconds (5 * $attempt)
-            }
-          }
-        }
-
-        while ($retryCount -lt $maxRetries -and -not $success) {
-          try {
-            Write-Host "Attempting download (Attempt $($retryCount + 1))..."
-            
-            # 使用兼容的下载方法
-            if (-not (Download-File -url $sdkUrl -path $installerPath)) {
-              throw "Download failed"
-            }
-
-            # 验证文件大小
-            $fileSize = (Get-Item $installerPath).Length
-            if ($fileSize -lt 1MB) {
-              throw "Downloaded file is too small ($fileSize bytes)"
-            }
-
-            # 安装
-            Write-Host "Starting installation..."
-            $process = Start-Process -Wait -PassThru -FilePath $installerPath -ArgumentList "/quiet /norestart"
-            
-            if ($process.ExitCode -ne 0) {
-              throw "Installer failed with exit code $($process.ExitCode)"
-            }
-
-            # 验证安装
-            $sdkHeaderPath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:SDK_VERSION\um\windows.h"
-            if (-not (Test-Path $sdkHeaderPath)) {
-              throw "SDK installation verification failed"
-            }
-
-            Write-Host "SDK installed successfully"
-            $success = $true
-          }
-          catch {
-            $retryCount++
-            if ($retryCount -ge $maxRetries) {
-              Write-Host "##[error] Failed after $maxRetries attempts: $_"
-              exit 1
-            }
-            
-            Write-Host "##[warning] Attempt $retryCount failed: $_"
-            Start-Sleep -Seconds (10 * $retryCount)
-            
-            # 清理可能损坏的文件
-            if (Test-Path $installerPath) {
-              Remove-Item $installerPath -Force
-            }
-          }
-        }
-
-    # 步骤2：安装WDK（同样兼容旧版PS）
+    # 步骤2：安装 WDK
     - name: Install WDK
       shell: powershell
       run: |
         $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2166289"
         $installerPath = "$env:RUNNER_TEMP\wdksetup.exe"
-        $retryCount = 0
-        $maxRetries = 3
-        $success = $false
-
-        function Download-File {
-          param($url, $path)
-          $attempt = 0
-          while ($attempt -lt 3) {
-            try {
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              $webClient = New-Object System.Net.WebClient
-              $webClient.DownloadFile($url, $path)
-              return $true
-            }
-            catch {
-              $attempt++
-              if ($attempt -ge 3) { return $false }
-              Start-Sleep -Seconds (5 * $attempt)
-            }
-          }
+        
+        # 下载 WDK
+        Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath
+        
+        # 安装 WDK
+        Start-Process -Wait -FilePath $installerPath -ArgumentList @(
+          "/quiet",
+          "/norestart",
+          "/features +"
+        )
+        
+        # 验证安装
+        $ntifsPath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h"
+        if (-not (Test-Path $ntifsPath)) {
+          Write-Host "##[error] WDK installation failed - ntifs.h not found!"
+          exit 1
         }
 
-        while ($retryCount -lt $maxRetries -and -not $success) {
-          try {
-            Write-Host "Attempting WDK download (Attempt $($retryCount + 1))..."
-            
-            if (-not (Download-File -url $wdkUrl -path $installerPath)) {
-              throw "WDK download failed"
-            }
+    # 步骤3：配置环境变量
+    - name: Setup Build Environment
+      shell: powershell
+      run: |
+        # 设置 SDK/WDK 路径
+        $sdkDir = "C:\Program Files (x86)\Windows Kits\10"
+        echo "WindowsSdkDir=$sdkDir" >> $env:GITHUB_ENV
+        echo "WindowsSDKVersion=$env:WDK_VERSION" >> $env:GITHUB_ENV
+        
+        # 设置包含路径
+        $env:INCLUDE = "$sdkDir\Include\$env:WDK_VERSION\km;$sdkDir\Include\$env:WDK_VERSION\shared;$env:INCLUDE"
+        $env:LIB = "$sdkDir\Lib\$env:WDK_VERSION\km\x64;$env:LIB"
 
-            $fileSize = (Get-Item $installerPath).Length
-            if ($fileSize -lt 1MB) {
-              throw "Downloaded WDK installer is too small ($fileSize bytes)"
-            }
-
-            Write-Host "Starting WDK installation..."
-            $process = Start-Process -Wait -PassThru -FilePath $installerPath -ArgumentList "/quiet /norestart"
-            
-            if ($process.ExitCode -ne 0) {
-              throw "WDK installer failed with exit code $($process.ExitCode)"
-            }
-
-            $ntifsPath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h"
-            if (-not (Test-Path $ntifsPath)) {
-              throw "WDK installation verification failed - ntifs.h not found"
-            }
-
-            Write-Host "WDK installed successfully"
-            $success = $true
-          }
-          catch {
-            $retryCount++
-            if ($retryCount -ge $maxRetries) {
-              Write-Host "##[error] WDK installation failed after $maxRetries attempts: $_"
-              exit 1
-            }
-            
-            Write-Host "##[warning] WDK attempt $retryCount failed: $_"
-            Start-Sleep -Seconds (10 * $retryCount)
-            
-            if (Test-Path $installerPath) {
-              Remove-Item $installerPath -Force
-            }
-          }
-        }
-
-    # 步骤3：编译驱动项目
+    # 步骤4：编译驱动项目
     - name: Build Driver
       shell: powershell
       run: |
@@ -178,7 +66,7 @@ jobs:
         & msbuild SGuardLimit_VMIO.vcxproj `
           /p:Configuration=Release `
           /p:Platform=x64 `
-          /p:WindowsTargetPlatformVersion=$env:SDK_VERSION `
+          /p:WindowsTargetPlatformVersion=$env:WDK_VERSION `
           /p:PlatformToolset=WindowsKernelModeDriver10.0 `
           /p:AdditionalIncludeDirectories="C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km" `
           /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006" `
@@ -190,7 +78,7 @@ jobs:
           exit 1
         }
 
-    # 步骤4：编译用户层程序
+    # 步骤5：编译用户层程序
     - name: Build User Application
       shell: powershell
       run: |
