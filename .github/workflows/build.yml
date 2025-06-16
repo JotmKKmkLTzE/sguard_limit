@@ -20,7 +20,7 @@ jobs:
     - name: Set up MSBuild
       uses: microsoft/setup-msbuild@v1
 
-    # 步骤1：可靠安装Windows SDK（带重试和校验）
+    # 步骤1：可靠安装Windows SDK（兼容旧版PS）
     - name: Install Windows SDK
       shell: powershell
       run: |
@@ -28,24 +28,42 @@ jobs:
         $installerPath = "$env:RUNNER_TEMP\winsdksetup.exe"
         $retryCount = 0
         $maxRetries = 3
+        $success = $false
 
-        function Get-FileHash($path) {
-          return (Get-FileHash -Algorithm SHA256 -Path $path).Hash
+        function Download-File {
+          param($url, $path)
+          $attempt = 0
+          while ($attempt -lt 3) {
+            try {
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              $webClient = New-Object System.Net.WebClient
+              $webClient.DownloadFile($url, $path)
+              return $true
+            }
+            catch {
+              $attempt++
+              if ($attempt -ge 3) { return $false }
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
         }
 
-        :downloadLoop while ($retryCount -lt $maxRetries) {
+        while ($retryCount -lt $maxRetries -and -not $success) {
           try {
-            # 下载文件
             Write-Host "Attempting download (Attempt $($retryCount + 1))..."
-            Invoke-WebRequest -Uri $sdkUrl -OutFile $installerPath -DisableKeepAlive -RetryIntervalSec 5 -MaximumRetryCount 3
             
-            # 验证文件完整性（基本大小检查）
+            # 使用兼容的下载方法
+            if (-not (Download-File -url $sdkUrl -path $installerPath)) {
+              throw "Download failed"
+            }
+
+            # 验证文件大小
             $fileSize = (Get-Item $installerPath).Length
             if ($fileSize -lt 1MB) {
               throw "Downloaded file is too small ($fileSize bytes)"
             }
 
-            # 尝试运行安装程序
+            # 安装
             Write-Host "Starting installation..."
             $process = Start-Process -Wait -PassThru -FilePath $installerPath -ArgumentList "/quiet /norestart"
             
@@ -60,7 +78,7 @@ jobs:
             }
 
             Write-Host "SDK installed successfully"
-            break downloadLoop
+            $success = $true
           }
           catch {
             $retryCount++
@@ -71,10 +89,15 @@ jobs:
             
             Write-Host "##[warning] Attempt $retryCount failed: $_"
             Start-Sleep -Seconds (10 * $retryCount)
+            
+            # 清理可能损坏的文件
+            if (Test-Path $installerPath) {
+              Remove-Item $installerPath -Force
+            }
           }
         }
 
-    # 步骤2：安装WDK（同样带完整性检查）
+    # 步骤2：安装WDK（同样兼容旧版PS）
     - name: Install WDK
       shell: powershell
       run: |
@@ -82,12 +105,34 @@ jobs:
         $installerPath = "$env:RUNNER_TEMP\wdksetup.exe"
         $retryCount = 0
         $maxRetries = 3
+        $success = $false
 
-        :downloadLoop while ($retryCount -lt $maxRetries) {
+        function Download-File {
+          param($url, $path)
+          $attempt = 0
+          while ($attempt -lt 3) {
+            try {
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              $webClient = New-Object System.Net.WebClient
+              $webClient.DownloadFile($url, $path)
+              return $true
+            }
+            catch {
+              $attempt++
+              if ($attempt -ge 3) { return $false }
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+        }
+
+        while ($retryCount -lt $maxRetries -and -not $success) {
           try {
             Write-Host "Attempting WDK download (Attempt $($retryCount + 1))..."
-            Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath -DisableKeepAlive -RetryIntervalSec 5 -MaximumRetryCount 3
             
+            if (-not (Download-File -url $wdkUrl -path $installerPath)) {
+              throw "WDK download failed"
+            }
+
             $fileSize = (Get-Item $installerPath).Length
             if ($fileSize -lt 1MB) {
               throw "Downloaded WDK installer is too small ($fileSize bytes)"
@@ -100,14 +145,13 @@ jobs:
               throw "WDK installer failed with exit code $($process.ExitCode)"
             }
 
-            # 验证WDK安装
             $ntifsPath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h"
             if (-not (Test-Path $ntifsPath)) {
               throw "WDK installation verification failed - ntifs.h not found"
             }
 
             Write-Host "WDK installed successfully"
-            break downloadLoop
+            $success = $true
           }
           catch {
             $retryCount++
@@ -118,6 +162,10 @@ jobs:
             
             Write-Host "##[warning] WDK attempt $retryCount failed: $_"
             Start-Sleep -Seconds (10 * $retryCount)
+            
+            if (Test-Path $installerPath) {
+              Remove-Item $installerPath -Force
+            }
           }
         }
 
