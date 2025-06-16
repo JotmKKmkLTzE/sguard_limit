@@ -12,9 +12,6 @@ jobs:
 
     - name: Setup NuGet 
       uses: NuGet/setup-nuget@v1 
-    
-    - name: Restore NuGet packages 
-      run: nuget restore .\packages.config -PackagesDirectory .\packages\ 
 
     # 步骤5：编译驱动项目
     - name: Build Driver
