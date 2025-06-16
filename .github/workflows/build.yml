@@ -56,4 +56,9 @@ jobs:
 
     # 上传产物
     - name: Upload Artifacts
-      uses: actions
+      uses: actions/upload-artifact@v4
+      with:
+        name: sguard_limit_binaries
+        path: |
+          SGuardLimit_VMIO/x64/Release/Hutao.sys
+          x64/Release/*.exe
