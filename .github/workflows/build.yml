@@ -1,63 +1,94 @@
-name: Build with Custom VM
+name: Build SGuardLimit Project
 
-on: [push]
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  WDK_VERSION: "10.0.22621.0"
 
 jobs:
   build:
-    runs-on: windows-latest
-    env:
-      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDS }}
-      
+    runs-on: windows-latest  # GitHub 托管的 Windows 运行器（已预装 VS 2022）
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Azure Login
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDS }}
+    # 步骤1：安装 WDK（静默模式）
+    - name: Install WDK
+      run: |
+        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2166289"
+        $installerPath = "$env:RUNNER_TEMP\wdksetup.exe"
+        
+        # 下载 WDK 安装程序
+        Write-Host "Downloading WDK from $wdkUrl..."
+        Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath
 
-    - name: Create VM from prebuilt image
-      uses: azure/CLI@v1
-      with:
-        inlineScript: |
-          az vm create \
-            --resource-group my-rg \
-            --name build-vm \
-            --image windows-wdk-22621-image \
-            --admin-username runner \
-            --admin-password ${{ secrets.VM_PASSWORD }} \
-            --size Standard_D4s_v3
+        # 静默安装到默认路径
+        Start-Process -Wait -FilePath $installerPath -ArgumentList @(
+          "/quiet",
+          "/norestart",
+          "/installpath `"C:\Program Files (x86)\Windows Kits\10`"
+        )
 
-    - name: Build via Remote Session
-      uses: appleboy/ssh-action@v1
-      with:
-        host: ${{ steps.vm.outputs.publicIP }}
-        username: runner
-        password: ${{ secrets.VM_PASSWORD }}
-        script: |
-          cd /mnt/c/repo
-          msbuild SGuardLimit_VMIO/SGuardLimit_VMIO.vcxproj /p:Configuration=Release /p:Platform=x64
-          msbuild sguard_limit/sguard_limit.sln /p:Configuration=Release /p:Platform=x64
+        # 验证安装
+        $ntifsPath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h"
+        if (-not (Test-Path $ntifsPath)) {
+          Write-Error "WDK installation failed - ntifs.h not found!"
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Recurse | Where-Object { $_.Name -eq "ntifs.h" }
+          exit 1
+        }
 
-    - name: Download Artifacts
-      uses: azure/CLI@v1
-      with:
-        inlineScript: |
-          az vm run-command invoke \
-            --resource-group my-rg \
-            --name build-vm \
-            --command-id RunPowerShellScript \
-            --scripts "Compress-Archive -Path C:\repo\SGuardLimit_VMIO\x64\Release\Hutao.sys, C:\repo\sguard_limit\x64\Release\*.exe -DestinationPath C:\artifacts.zip"
+    # 步骤2：配置环境变量
+    - name: Setup Environment
+      run: |
+        # 设置 MSBuild 和 WDK 路径
+        $env:WindowsSdkDir = "C:\Program Files (x86)\Windows Kits\10"
+        $env:WindowsSDKVersion = "$env:WDK_VERSION"
+        $env:INCLUDE = "$env:WindowsSdkDir\Include\$env:WDK_VERSION\km;$env:WindowsSdkDir\Include\$env:WDK_VERSION\shared;$env:INCLUDE"
+        $env:LIB = "$env:WindowsSdkDir\Lib\$env:WDK_VERSION\km\x64;$env:LIB"
 
-          az vm disk download \
-            --resource-group my-rg \
-            --name build-vm \
-            --path C:\artifacts.zip \
-            --output-path ./artifacts.zip
+        # 打印关键路径验证
+        Write-Host "WDK Include Path: $env:WindowsSdkDir\Include\$env:WDK_VERSION\km"
+        Write-Host "MSBuild Path: $(where.exe msbuild)"
 
+    # 步骤3：编译驱动项目
+    - name: Build Driver
+      run: |
+        cd SGuardLimit_VMIO
+        
+        # 使用完整路径调用 MSBuild
+        & "$(where.exe msbuild)" SGuardLimit_VMIO.vcxproj `
+          /p:Configuration=Release `
+          /p:Platform=x64 `
+          /p:WindowsTargetPlatformVersion=$env:WDK_VERSION `
+          /p:PlatformToolset=WindowsKernelModeDriver10.0 `
+          /p:AdditionalIncludeDirectories="C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km" `
+          /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006" `
+          /flp:"LogFile=build.log;Verbosity=diagnostic"
+
+        # 验证输出
+        if (-not (Test-Path "x64\Release\Hutao.sys")) {
+          Write-Error "Driver compilation failed!"
+          Get-Content "build.log" -Tail 50 | Write-Host
+          exit 1
+        }
+
+    # 步骤4：编译用户层程序
+    - name: Build User Application
+      run: |
+        cd sguard_limit
+        & "$(where.exe msbuild)" sguard_limit.sln `
+          /p:Configuration=Release `
+          /p:Platform=x64
+
+    # 上传产物
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: binaries
-        path: artifacts.zip
+        path: |
+          SGuardLimit_VMIO/x64/Release/Hutao.sys
+          sguard_limit/x64/Release/*.exe
