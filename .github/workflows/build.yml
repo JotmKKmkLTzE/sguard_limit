@@ -1,0 +1,65 @@
+name: Build SGuardLimit Project
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  WDK_VERSION: "10.0.22621.0"     # 必须与项目要求的 WDK 版本一致
+  PLATFORM_TOOLSET: "WindowsKernelModeDriver10.0"  # 驱动工具集
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 安装 WDK 和配置 MSBuild
+    - name: Setup Build Environment
+      run: |
+        curl -LO https://go.microsoft.com/fwlink/?linkid=2166289
+        start /wait wdksetup.exe /quiet /install
+      shell: powershell
+
+    - name: Set up MSBuild
+      uses: microsoft/setup-msbuild@v1
+
+    # 编译驱动项目（生成 Hutao.sys）
+    - name: Build SGuardLimit_VMIO Driver
+      run: |
+        cd SGuardLimit_VMIO
+        msbuild SGuardLimit_VMIO.vcxproj ^
+          /p:Configuration=Release ^
+          /p:Platform=x64 ^
+          /p:WindowsTargetPlatformVersion=%WDK_VERSION% ^
+          /p:PlatformToolset=%PLATFORM_TOOLSET%
+
+        # 严格验证输出文件
+        if not exist "x64\Release\Hutao.sys" (
+          echo ##[error] Hutao.sys not found in x64\Release!
+          dir x64\Release
+          exit 1
+        )
+
+    # 编译用户层解决方案（sguard_limit.sln）
+    - name: Build sguard_limit Solution
+      run: |
+        msbuild sguard_limit.sln ^
+          /p:Configuration=Release ^
+          /p:Platform=x64
+
+    # 打包所有生成的文件
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: sguard_limit_binaries
+        path: |
+          SGuardLimit_VMIO/x64/Release/Hutao.sys
+          x64/Release/*.exe          # 用户层程序（如 sguard_limit.exe）
+          x64/Release/*.dll          # 依赖库（如有）
