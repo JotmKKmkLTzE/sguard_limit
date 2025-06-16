@@ -13,77 +13,87 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        shell: powershell  # 统一使用PowerShell
+        shell: powershell
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 安装WDK（纯PowerShell语法）
-    - name: Install WDK
+    # 步骤1：安装Visual Studio Build Tools
+    - name: Install VS Build Tools
+      run: |
+        choco install -y visualstudio2022-buildtools --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+        refreshenv
+
+    # 步骤2：分步安装WDK组件
+    - name: Install WDK Components
       run: |
         # 下载WDK安装程序
-        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile "wdksetup.exe"
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile wdksetup.exe
         
-        # 静默安装WDK
-        $installArgs = @(
+        # 分步安装必要组件
+        Start-Process -Wait -FilePath .\wdksetup.exe -ArgumentList @(
           "/quiet",
           "/norestart",
-          "/installpath `"C:\Program Files (x86)\Windows Kits\10`""
+          "/installpath `"C:\WDK`"",
+          "features +",
+          "OptionId.WindowsDriverKitComplete",
+          "OptionId.WindowsDriverKitVSIntegration"
         )
-        Start-Process -Wait -FilePath ".\wdksetup.exe" -ArgumentList $installArgs
         
         # 验证安装
-        if (-not (Test-Path "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h")) {
-          Write-Error "WDK installation failed - ntifs.h not found"
-          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10" -Recurse | Where-Object { $_.Name -eq "ntifs.h" } | Select-Object FullName
+        $ntifsPath = "C:\WDK\Include\$env:WDK_VERSION\km\ntifs.h"
+        if (-not (Test-Path $ntifsPath)) {
+          Write-Error "Critical WDK files missing!"
+          Write-Host "Searching for ntifs.h in system..."
+          Get-ChildItem "C:\" -Recurse -Filter "ntifs.h" -ErrorAction SilentlyContinue | Select-Object FullName
           exit 1
         }
         
         # 设置环境变量
-        echo "WINDOWSSDKDIR=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
-        echo "WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
+        echo "WINDOWSSDKDIR=C:\WDK" >> $env:GITHUB_ENV
+        echo "WindowsSdkDir=C:\WDK" >> $env:GITHUB_ENV
         echo "WindowsSDKVersion=$env:WDK_VERSION" >> $env:GITHUB_ENV
 
-    # 设置MSBuild环境（仍使用专用action）
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v1
-      with:
-        vs-version: 17.0
-        windows-sdk-version: ${{ env.WDK_VERSION }}
+    # 步骤3：设置完整构建环境
+    - name: Setup Build Environment
+      run: |
+        # 设置完整的包含路径
+        $env:INCLUDE = "C:\WDK\Include\$env:WDK_VERSION\km;C:\WDK\Include\$env:WDK_VERSION\shared;$env:INCLUDE"
+        $env:LIB = "C:\WDK\Lib\$env:WDK_VERSION\km\x64;$env:LIB"
+        
+        # 验证环境
+        Write-Host "INCLUDE paths: $env:INCLUDE"
+        Write-Host "LIB paths: $env:LIB"
+        dir "C:\WDK\Include\$env:WDK_VERSION\km\nt*" | Select-Object Name
 
-    # 编译驱动项目（使用PowerShell调用msbuild）
+    # 步骤4：编译驱动项目
     - name: Build SGuardLimit_VMIO Driver
       run: |
         cd SGuardLimit_VMIO
         
-        # 设置环境变量
-        $env:WDK_DIR = "C:\Program Files (x86)\Windows Kits\10"
-        $env:WDK_VER = $env:WDK_VERSION
-        $env:INCLUDE = "$env:WDK_DIR\Include\$env:WDK_VER\km;$env:WDK_DIR\Include\$env:WDK_VER\shared;$env:INCLUDE"
-        $env:LIB = "$env:WDK_DIR\Lib\$env:WDK_VER\km\x64;$env:LIB"
-        
-        # 清理并构建
+        # 强制清理
         if (Test-Path "x64") { Remove-Item -Recurse -Force "x64" }
         
-        msbuild SGuardLimit_VMIO.vcxproj `
+        # 使用完整路径调用msbuild
+        & "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\msbuild.exe" SGuardLimit_VMIO.vcxproj `
           /p:Configuration=Release `
           /p:Platform=x64 `
-          /p:WindowsTargetPlatformVersion=$env:WDK_VER `
+          /p:WindowsTargetPlatformVersion=$env:WDK_VERSION `
           /p:PlatformToolset=WindowsKernelModeDriver10.0 `
-          /p:AdditionalIncludeDirectories="$env:WDK_DIR\Include\$env:WDK_VER\km;$env:WDK_DIR\Include\$env:WDK_VER\shared" `
+          /p:AdditionalIncludeDirectories="C:\WDK\Include\$env:WDK_VERSION\km;C:\WDK\Include\$env:WDK_VERSION\shared" `
           /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006"
         
         if (-not (Test-Path "x64\Release\Hutao.sys")) {
-          Write-Error "Hutao.sys not found!"
+          Write-Error "Driver compilation failed!"
           Get-ChildItem -Recurse "x64\Release"
           exit 1
         }
 
-    # 编译用户层解决方案
+    # 步骤5：编译用户层解决方案
     - name: Build sguard_limit Solution
       run: |
-        msbuild sguard_limit.sln `
+        & "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\msbuild.exe" sguard_limit.sln `
           /p:Configuration=Release `
           /p:Platform=x64
 
