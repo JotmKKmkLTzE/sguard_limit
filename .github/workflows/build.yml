@@ -1,39 +1,63 @@
-- name: Build in WDK Container
-  run: |
-    docker run --rm `
-      --isolation=process `
-      -v ${GITHUB_WORKSPACE}:/repo `
-      mcr.microsoft.com/windows/servercore:ltsc2022 powershell -Command "
-        # Setup WDK and VS build tools
-        Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_buildtools.exe' -OutFile 'vs_buildtools.exe'
-        Start-Process -Wait -FilePath '.\vs_buildtools.exe' -ArgumentList @(
-          '--quiet',
-          '--norestart',
-          '--wait',
-          '--add Microsoft.VisualStudio.Workload.VCTools',
-          '--add Microsoft.VisualStudio.Component.Windows10SDK.22621'
-        )
-        if (-not (Test-Path 'C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km\ntifs.h')) { 
-          Write-Error 'WDK installation verification failed!'
-          exit 1
-        }
-        
-        # Build steps
-        cd 'C:\repo\SGuardLimit_VMIO'
-        msbuild 'SGuardLimit_VMIO.vcxproj' `
-          /p:Configuration=Release `
-          /p:Platform=x64 `
-          /p:WindowsTargetPlatformVersion=10.0.22621.0 `
-          /p:PlatformToolset=WindowsKernelModeDriver10.0
+name: Build with Custom VM
 
-        cd 'C:\repo\sguard_limit'
-        msbuild 'sguard_limit.sln' `
-          /p:Configuration=Release `
-          /p:Platform=x64
+on: [push]
 
-        # Copy artifacts
-        Copy-Item -Path 'C:\repo\SGuardLimit_VMIO\x64\Release\Hutao.sys' -Destination 'C:\host\'
-        Copy-Item -Path 'C:\repo\sguard_limit\x64\Release\*.exe' -Destination 'C:\host\'
-      "
-  env:
-    GITHUB_WORKSPACE: C:\repo
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDS }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDS }}
+
+    - name: Create VM from prebuilt image
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          az vm create \
+            --resource-group my-rg \
+            --name build-vm \
+            --image windows-wdk-22621-image \
+            --admin-username runner \
+            --admin-password ${{ secrets.VM_PASSWORD }} \
+            --size Standard_D4s_v3
+
+    - name: Build via Remote Session
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ steps.vm.outputs.publicIP }}
+        username: runner
+        password: ${{ secrets.VM_PASSWORD }}
+        script: |
+          cd /mnt/c/repo
+          msbuild SGuardLimit_VMIO/SGuardLimit_VMIO.vcxproj /p:Configuration=Release /p:Platform=x64
+          msbuild sguard_limit/sguard_limit.sln /p:Configuration=Release /p:Platform=x64
+
+    - name: Download Artifacts
+      uses: azure/CLI@v1
+      with:
+        inlineScript: |
+          az vm run-command invoke \
+            --resource-group my-rg \
+            --name build-vm \
+            --command-id RunPowerShellScript \
+            --scripts "Compress-Archive -Path C:\repo\SGuardLimit_VMIO\x64\Release\Hutao.sys, C:\repo\sguard_limit\x64\Release\*.exe -DestinationPath C:\artifacts.zip"
+
+          az vm disk download \
+            --resource-group my-rg \
+            --name build-vm \
+            --path C:\artifacts.zip \
+            --output-path ./artifacts.zip
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries
+        path: artifacts.zip
