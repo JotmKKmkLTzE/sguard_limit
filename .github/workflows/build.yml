@@ -71,14 +71,19 @@ jobs:
       run: |
         cd SGuardLimit_VMIO
         
-        & msbuild SGuardLimit_VMIO.vcxproj `
-          /p:Configuration=Release `
-          /p:Platform=x64 `
-          /p:WindowsTargetPlatformVersion=$env:WDK_VERSION `
-          /p:PlatformToolset=WindowsKernelModeDriver10.0 `
-          /p:AdditionalIncludeDirectories="C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km" `
-          /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006" `
-          /flp:"LogFile=driver_build.log;Verbosity=diagnostic"
+        # 使用数组传递参数（避免引号解析问题）
+        $msbuildArgs = @(
+          "SGuardLimit_VMIO.vcxproj",
+          "/p:Configuration=Release",
+          "/p:Platform=x64",
+          "/p:WindowsTargetPlatformVersion=$env:WDK_VERSION",
+          "/p:PlatformToolset=WindowsKernelModeDriver10.0",
+          "/p:AdditionalIncludeDirectories=`"C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km`"",
+          "/p:PreprocessorDefinitions=`"WIN64;_AMD64_;NTDDI_VERSION=0x0A000006`"",
+          "/flp:LogFile=driver_build.log;Verbosity=diagnostic"
+        )
+        
+        msbuild @msbuildArgs
         
         if (-not (Test-Path "x64\Release\Hutao.sys")) {
           Write-Host "##[error] Driver compilation failed!"
@@ -91,10 +96,7 @@ jobs:
       shell: powershell
       run: |
         cd sguard_limit
-        & msbuild sguard_limit.sln `
-          /p:Configuration=Release `
-          /p:Platform=x64 `
-          /flp:"LogFile=user_build.log;Verbosity=diagnostic"
+        msbuild sguard_limit.sln /p:Configuration=Release /p:Platform=x64
 
     # 上传产物
     - name: Upload Artifacts
