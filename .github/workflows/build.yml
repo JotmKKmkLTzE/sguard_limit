@@ -16,125 +16,73 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 步骤1：安装Visual Studio Build Tools（确保基础环境）
-    - name: Install VS Build Tools
+    # 步骤1：安装WDK（修复字符串引号问题）
+    - name: Install WDK
       shell: powershell
       run: |
-        $vsInstallerUrl = "https://aka.ms/vs/17/release/vs_buildtools.exe"
-        $installerPath = "$env:RUNNER_TEMP\vs_buildtools.exe"
-        
-        # 下载安装程序
-        Invoke-WebRequest -Uri $vsInstallerUrl -OutFile $installerPath
-        
-        # 安装必要组件
-        $installArgs = @(
-          "--quiet",
-          "--norestart",
-          "--wait",
-          "--add Microsoft.VisualStudio.Workload.VCTools",
-          "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-          "--add Microsoft.VisualStudio.Component.Windows10SDK.$env:WDK_VERSION"
-        )
-        Start-Process -Wait -FilePath $installerPath -ArgumentList $installArgs
-        
-        # 验证安装
-        $msbuildPath = "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\msbuild.exe"
-        if (-not (Test-Path $msbuildPath)) {
-          Write-Error "VS Build Tools installation failed!"
-          exit 1
-        }
-
-    # 步骤2：安装WDK（带完整组件验证）
-    - name: Install WDK with Verification
-      shell: powershell
-      run: |
-        # 下载WDK
+        # 下载WDK安装程序
         $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2166289"
         $installerPath = "$env:RUNNER_TEMP\wdksetup.exe"
+        Write-Host "Downloading WDK from $wdkUrl..."
         Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath
 
-        # 安装到自定义目录（避免权限问题）
-        $installDir = "C:\WDK"
-        New-Item -ItemType Directory -Path $installDir -Force
+        # 安装WDK（使用单引号定义路径）
         $installArgs = @(
           "/quiet",
           "/norestart",
-          "/installpath `"$installDir`"",
-          "features +", 
-          "OptionId.WindowsDriverKitComplete"
+          "/installpath `"C:\Program Files (x86)\Windows Kits\10`""
         )
         Start-Process -Wait -FilePath $installerPath -ArgumentList $installArgs
 
-        # 多层次验证
-        $requiredFiles = @(
-          "$installDir\Include\$env:WDK_VERSION\km\ntifs.h",
-          "$installDir\Include\$env:WDK_VERSION\km\ntddk.h",
-          "$installDir\Lib\$env:WDK_VERSION\km\x64\ntoskrnl.lib"
-        )
-
-        $missingFiles = $requiredFiles | Where-Object { -not (Test-Path $_) }
-        if ($missingFiles) {
-          Write-Error "Missing critical WDK files:"
-          $missingFiles | ForEach-Object { Write-Host $_ }
-          
-          Write-Host "Available WDK versions:"
-          Get-ChildItem "$installDir\Include" | Select-Object Name
-          
-          Write-Host "Directory structure:"
-          tree "$installDir\Include" /F /A
-          
-          exit 1
-        }
-
-        # 设置环境变量
-        echo "WINDOWSSDKDIR=$installDir" >> $env:GITHUB_ENV
-        echo "WindowsSdkDir=$installDir" >> $env:GITHUB_ENV
-        echo "WindowsSDKVersion=$env:WDK_VERSION" >> $env:GITHUB_ENV
-
-    # 步骤3：配置构建环境
-    - name: Setup Build Environment
+    # 步骤2：配置环境变量
+    - name: Setup Environment
       shell: powershell
       run: |
-        # 设置完整工具链路径
-        $env:PATH = "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin;${env:PATH}"
-        $env:PATH = "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.43.34808\bin\Hostx64\x64;${env:PATH}"
-        
-        # 打印关键工具版本
-        cl.exe /?
-        link.exe /?
-        msbuild /version
+        # 使用Join-Path安全拼接路径
+        $sdkDir = "C:\Program Files (x86)\Windows Kits\10"
+        $env:WindowsSdkDir = $sdkDir
+        $env:WindowsSDKVersion = $env:WDK_VERSION
+        $env:INCLUDE = "$(Join-Path $sdkDir "Include\$env:WDK_VERSION\km");$(Join-Path $sdkDir "Include\$env:WDK_VERSION\shared");$env:INCLUDE"
+        $env:LIB = "$(Join-Path $sdkDir "Lib\$env:WDK_VERSION\km\x64");$env:LIB"
 
-    # 步骤4：编译驱动项目
+        # 打印验证信息
+        Write-Host "WDK paths configured:"
+        Write-Host "INCLUDE = $env:INCLUDE"
+        Write-Host "LIB = $env:LIB"
+
+    # 步骤3：编译驱动项目
     - name: Build Driver
       shell: powershell
       run: |
         cd SGuardLimit_VMIO
         
-        # 使用完整环境配置
-        $msbuildArgs = @(
-          "/p:Configuration=Release",
-          "/p:Platform=x64",
-          "/p:WindowsTargetPlatformVersion=$env:WDK_VERSION",
-          "/p:PlatformToolset=WindowsKernelModeDriver10.0",
-          "/p:AdditionalIncludeDirectories=`"C:\WDK\Include\$env:WDK_VERSION\km;C:\WDK\Include\$env:WDK_VERSION\shared`"",
-          "/p:PreprocessorDefinitions=`"WIN64;_AMD64_;NTDDI_VERSION=0x0A000006`"",
-          "/flp:`"LogFile=build.log;Verbosity=diagnostic`""
-        )
+        # 使用Join-Path处理路径
+        $msbuildPath = (Get-Command msbuild).Source
+        $includePath = "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km"
         
-        msbuild SGuardLimit_VMIO.vcxproj @msbuildArgs
-        
+        & $msbuildPath SGuardLimit_VMIO.vcxproj `
+          /p:Configuration=Release `
+          /p:Platform=x64 `
+          /p:WindowsTargetPlatformVersion=$env:WDK_VERSION `
+          /p:PlatformToolset=WindowsKernelModeDriver10.0 `
+          /p:AdditionalIncludeDirectories="$includePath" `
+          /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006" `
+          /flp:"LogFile=build.log;Verbosity=diagnostic"
+
         if (-not (Test-Path "x64\Release\Hutao.sys")) {
           Write-Error "Driver compilation failed!"
-          Get-Content "build.log" -Tail 100 | Write-Host
+          Get-Content "build.log" -Tail 50 | Write-Host
           exit 1
         }
 
-    # 步骤5：编译用户层程序
+    # 步骤4：编译用户层程序
     - name: Build User Application
       shell: powershell
       run: |
         cd sguard_limit
-        msbuild sguard_limit.sln /p:Configuration=Release /p:Platform=x64
+        & (Get-Command msbuild).Source sguard_limit.sln `
+          /p:Configuration=Release `
+          /p:Platform=x64
 
     # 上传产物
     - name: Upload Artifacts
