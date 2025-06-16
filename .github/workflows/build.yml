@@ -13,65 +13,78 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        shell: cmd
+        shell: powershell  # 统一使用PowerShell
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 使用官方推荐的WDK安装方式
+    # 安装WDK（纯PowerShell语法）
     - name: Install WDK
       run: |
-        curl.exe -L -o wdksetup.exe https://go.microsoft.com/fwlink/?linkid=2166289
-        start /wait wdksetup.exe /quiet /norestart /installpath "C:\Program Files (x86)\Windows Kits\10"
+        # 下载WDK安装程序
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile "wdksetup.exe"
+        
+        # 静默安装WDK
+        $installArgs = @(
+          "/quiet",
+          "/norestart",
+          "/installpath `"C:\Program Files (x86)\Windows Kits\10`""
+        )
+        Start-Process -Wait -FilePath ".\wdksetup.exe" -ArgumentList $installArgs
+        
+        # 验证安装
+        if (-not (Test-Path "C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km\ntifs.h")) {
+          Write-Error "WDK installation failed - ntifs.h not found"
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10" -Recurse | Where-Object { $_.Name -eq "ntifs.h" } | Select-Object FullName
+          exit 1
+        }
         
         # 设置环境变量
         echo "WINDOWSSDKDIR=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
         echo "WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
-        echo "WindowsSDKVersion=${{ env.WDK_VERSION }}" >> $env:GITHUB_ENV
-      shell: powershell
+        echo "WindowsSDKVersion=$env:WDK_VERSION" >> $env:GITHUB_ENV
 
-    # 设置构建环境
-    - name: Setup Build Environment
+    # 设置MSBuild环境（仍使用专用action）
+    - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v1
       with:
         vs-version: 17.0
         windows-sdk-version: ${{ env.WDK_VERSION }}
 
-    # 编译驱动项目 - 终极修复
+    # 编译驱动项目（使用PowerShell调用msbuild）
     - name: Build SGuardLimit_VMIO Driver
       run: |
         cd SGuardLimit_VMIO
         
-        # 设置完整的WDK环境变量
-        set WDK_DIR=C:\Program Files (x86)\Windows Kits\10
-        set WDK_VER=%WDK_VERSION%
-        set INCLUDE=%WDK_DIR%\Include\%WDK_VER%\km;%WDK_DIR%\Include\%WDK_VER%\shared;%INCLUDE%
-        set LIB=%WDK_DIR%\Lib\%WDK_VER%\km\x64;%LIB%
+        # 设置环境变量
+        $env:WDK_DIR = "C:\Program Files (x86)\Windows Kits\10"
+        $env:WDK_VER = $env:WDK_VERSION
+        $env:INCLUDE = "$env:WDK_DIR\Include\$env:WDK_VER\km;$env:WDK_DIR\Include\$env:WDK_VER\shared;$env:INCLUDE"
+        $env:LIB = "$env:WDK_DIR\Lib\$env:WDK_VER\km\x64;$env:LIB"
         
-        # 强制清理并重建
-        if exist "x64" rd /s /q x64
+        # 清理并构建
+        if (Test-Path "x64") { Remove-Item -Recurse -Force "x64" }
         
-        msbuild SGuardLimit_VMIO.vcxproj ^
-          /p:Configuration=Release ^
-          /p:Platform=x64 ^
-          /p:WindowsTargetPlatformVersion=%WDK_VER% ^
-          /p:PlatformToolset=WindowsKernelModeDriver10.0 ^
-          /p:AdditionalIncludeDirectories="%WDK_DIR%\Include\%WDK_VER%\km;%WDK_DIR%\Include\%WDK_VER%\shared" ^
+        msbuild SGuardLimit_VMIO.vcxproj `
+          /p:Configuration=Release `
+          /p:Platform=x64 `
+          /p:WindowsTargetPlatformVersion=$env:WDK_VER `
+          /p:PlatformToolset=WindowsKernelModeDriver10.0 `
+          /p:AdditionalIncludeDirectories="$env:WDK_DIR\Include\$env:WDK_VER\km;$env:WDK_DIR\Include\$env:WDK_VER\shared" `
           /p:PreprocessorDefinitions="WIN64;_AMD64_;NTDDI_VERSION=0x0A000006"
         
-        if not exist "x64\Release\Hutao.sys" (
-          echo ##[error] Hutao.sys not found!
-          echo ##[error] Checking WDK installation...
-          dir "%WDK_DIR%\Include\%WDK_VER%\km"
+        if (-not (Test-Path "x64\Release\Hutao.sys")) {
+          Write-Error "Hutao.sys not found!"
+          Get-ChildItem -Recurse "x64\Release"
           exit 1
-        )
+        }
 
     # 编译用户层解决方案
     - name: Build sguard_limit Solution
       run: |
-        msbuild sguard_limit.sln ^
-          /p:Configuration=Release ^
+        msbuild sguard_limit.sln `
+          /p:Configuration=Release `
           /p:Platform=x64
 
     # 上传产物
