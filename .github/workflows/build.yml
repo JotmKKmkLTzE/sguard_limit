@@ -19,39 +19,47 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 完整安装WDK和SDK
+    # 安装WDK和SDK（纯PowerShell语法）
     - name: Install WDK and SDK
       run: |
-        curl.exe -L -o wdksetup.exe https://go.microsoft.com/fwlink/?linkid=2166289
-        start /wait wdksetup.exe /quiet /install features + options.WindowsDriverKitComplete
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2166289" -OutFile "wdksetup.exe"
         
-        # 设置环境变量
-        echo "WINDOWSSDKDIR=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
-        echo "WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10" >> $env:GITHUB_ENV
-        echo "WindowsSDKVersion=${{ env.WDK_VERSION }}" >> $env:GITHUB_ENV
+        Start-Process -Wait -FilePath ".\wdksetup.exe" -ArgumentList @(
+          "/quiet",
+          "/install",
+          "features",
+          "+",
+          "options.WindowsDriverKitComplete"
+        )
+        
+        $env:WINDOWSSDKDIR = "C:\Program Files (x86)\Windows Kits\10"
+        $env:WindowsSdkDir = "C:\Program Files (x86)\Windows Kits\10"
+        $env:WindowsSDKVersion = "${{ env.WDK_VERSION }}"
+        Add-Content -Path $env:GITHUB_ENV -Value "WINDOWSSDKDIR=$env:WINDOWSSDKDIR"
+        Add-Content -Path $env:GITHUB_ENV -Value "WindowsSdkDir=$env:WindowsSdkDir"
+        Add-Content -Path $env:GITHUB_ENV -Value "WindowsSDKVersion=$env:WindowsSDKVersion"
       shell: powershell
 
-    # 设置完整的构建环境
+    # 设置构建环境
     - name: Setup Build Environment
       uses: microsoft/setup-msbuild@v1
       with:
         vs-version: 17.0
         windows-sdk-version: ${{ env.WDK_VERSION }}
 
-    # 编译驱动项目 - 关键修复
+    # 编译驱动项目
     - name: Build SGuardLimit_VMIO Driver
       run: |
         cd SGuardLimit_VMIO
         
-        # 先清理可能存在的旧配置
         if exist "x64" rd /s /q x64
         
         msbuild SGuardLimit_VMIO.vcxproj ^
           /p:Configuration=Release ^
           /p:Platform=x64 ^
-          /p:WindowsTargetPlatformVersion=$env:WDK_VERSION ^
+          /p:WindowsTargetPlatformVersion=%WDK_VERSION% ^
           /p:PlatformToolset=WindowsKernelModeDriver10.0 ^
-          /p:AdditionalIncludeDirectories="C:\Program Files (x86)\Windows Kits\10\Include\$env:WDK_VERSION\km" ^
+          /p:AdditionalIncludeDirectories="C:\Program Files (x86)\Windows Kits\10\Include\%WDK_VERSION%\km" ^
           /p:PreprocessorDefinitions="WIN64;_AMD64_;_X86_;NTDDI_VERSION=0x0A000006;WIN32_LEAN_AND_MEAN"
         
         if not exist "x64\Release\Hutao.sys" (
